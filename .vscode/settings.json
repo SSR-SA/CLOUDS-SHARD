@@ -1,0 +1,9 @@
+{
+  "files.associations": {
+    ".env*": "dotenv",
+    "iostream": "cpp",
+    "string": "cpp",
+    "__locale": "cpp",
+    "ostream": "cpp"
+  }
+}

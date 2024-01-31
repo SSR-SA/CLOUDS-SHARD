@@ -83,7 +83,7 @@ $(SHARD_OBJ)/%.o: $(SHARD_SRC)/%.cc $(SHARD_SRC)/shardkv.h | $(SHARD_OBJ)
 $(SHARDMANAGER_OBJ)/%.o: $(SHARDMANAGER_SRC)/%.cc $(SHARDMANAGER_SRC)/shardkv_manager.h | $(SHARDMANAGER_OBJ)
 	$(CXX) $(CPPFLAGS) -c $< -o $@
 
-$(SHARDMASTER_OBJ)/%.o: $(SHARDMASTER_SRC)/%.cc $(SHARDMASTER_SRC)/shardmaster.h| $(SHARDMASTER_OBJ)
+$(SHARDMASTER_OBJ)/%.o: $(SHARDMASTER_SRC)/%.cc $(SHARDMASTER_SRC)/shardmaster.h | $(SHARDMASTER_OBJ)
 	$(CXX) $(CPPFLAGS) -c $< -o $@
 
 $(CONFIG_OBJ)/%.o: $(CONFIG_SRC)/%.cc $(CONFIG_SRC)/config.h | $(CONFIG_OBJ)
@@ -113,11 +113,11 @@ shardmaster: shardmaster.pb.o shardmaster.grpc.pb.o $(SHARDMASTER_OBJS) $(COMMON
 client: shardkv.grpc.pb.o shardkv.pb.o shardmaster.pb.o shardmaster.grpc.pb.o $(CLIENT_OBJS) $(COMMON_OBJS) $(CONFIG_OBJS) $(REPL_OBJS)
 	$(CXX) $^ $(LDFLAGS) -o $@
 
-%.grpc.pb.cc: %.proto
-	$(PROTOC) -I $(PROTOS_PATH) --grpc_out=. --plugin=protoc-gen-grpc=$(GRPC_CPP_PLUGIN_PATH) $<
-
-%.pb.cc: %.proto
+%.pb.cc %.pb.h: %.proto
 	$(PROTOC) -I $(PROTOS_PATH) --cpp_out=. $<
+
+%.grpc.pb.cc: %.proto %.pb.cc
+	$(PROTOC) -I $(PROTOS_PATH) --grpc_out=. --plugin=protoc-gen-grpc=$(GRPC_CPP_PLUGIN_PATH) $<
 
 $(TEST_UTILS_OBJ)/%.o: $(TEST_UTILS_SRC)/%.cc
 	$(CXX) $(CPPFLAGS) -c $^ -o $@
@@ -240,4 +240,3 @@ endif
 ifneq ($(SYSTEM_OK),true)
 	@false
 endif
-

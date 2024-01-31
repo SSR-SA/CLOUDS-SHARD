@@ -1,88 +1,138 @@
 #include "shardmaster.h"
+#include <vector>
 
-/**
- * Based on the server specified in JoinRequest, you should update the
- * shardmaster's internal representation that this server has joined. Remember,
- * you get to choose how to represent everything the shardmaster tracks in
- * shardmaster.h! Be sure to rebalance the shards in equal proportions to all
- * the servers. This function should fail if the server already exists in the
- * configuration.
- *
- * @param context - you can ignore this
- * @param request A message containing the address of a key-value server that's
- * joining
- * @param response An empty message, as we don't need to return any data
- * @return ::grpc::Status::OK on success, or
- * ::grpc::Status(::grpc::StatusCode::INVALID_ARGUMENT, "<your error message
- * here>")
- */
 ::grpc::Status StaticShardmaster::Join(::grpc::ServerContext* context,
                                        const ::JoinRequest* request,
                                        Empty* response) {
-    return ::grpc::Status(::grpc::StatusCode::INVALID_ARGUMENT, "Not implemented yet");
+    std::lock_guard<std::mutex> lock(ssm_mtx);
+
+    const auto& server_id = request->server();
+    if(ssm.find(server_id) != ssm.end()){
+        return ::grpc::Status(::grpc::StatusCode::INVALID_ARGUMENT, "Server already exists");
+    }
+
+    ser.push_back(server_id);
+    ssm[server_id] = {};
+
+    int total_servers = ssm.size();
+    int key_range = MAX_KEY - MIN_KEY + 1;
+    int keys_per_server = key_range / total_servers;
+    int extra_keys = key_range % total_servers;
+
+    int lower_bound = MIN_KEY;
+    for(auto& server : ser){
+        int upper_bound = lower_bound + keys_per_server - 1;
+        if(extra_keys > 0){
+            upper_bound++;
+            extra_keys--;
+        }
+
+        ssm[server] = {shard_t{lower_bound, upper_bound}};
+        lower_bound = upper_bound + 1;
+    }
+
+    return ::grpc::Status::OK;
 }
 
-/**
- * LeaveRequest will specify a list of servers leaving. This will be very
- * similar to join, wherein you should update the shardmaster's internal
- * representation to reflect the fact the server(s) are leaving. Once that's
- * completed, be sure to rebalance the shards in equal proportions to the
- * remaining servers. If any of the specified servers do not exist in the
- * current configuration, this function should fail.
- *
- * @param context - you can ignore this
- * @param request A message containing a list of server addresses that are
- * leaving
- * @param response An empty message, as we don't need to return any data
- * @return ::grpc::Status::OK on success, or
- * ::grpc::Status(::grpc::StatusCode::INVALID_ARGUMENT, "<your error message
- * here>")
- */
+
 ::grpc::Status StaticShardmaster::Leave(::grpc::ServerContext* context,
                                         const ::LeaveRequest* request,
                                         Empty* response) {
-    return ::grpc::Status(::grpc::StatusCode::INVALID_ARGUMENT, "Not implemented yet");
+    std::lock_guard<std::mutex> lock(ssm_mtx);
+
+    int total_keys = MAX_KEY - MIN_KEY + 1;
+
+    for(int i = 0; i < request->servers_size(); ++i){
+        const auto& server_id = request->servers(i);
+        if(ssm.find(server_id) == ssm.end()){
+            return ::grpc::Status(::grpc::StatusCode::INVALID_ARGUMENT, "Server not found");
+        }
+
+        ssm.erase(server_id);
+        auto it = std::find(ser.begin(), ser.end(), server_id);
+        if (it != ser.end()) ser.erase(it);
+    }
+
+    int total_servers = ssm.size();
+    int keys_per_server = total_keys / total_servers;
+    int extra_keys = total_keys % total_servers;
+
+    int lower_bound = MIN_KEY;
+    for(auto& server : ser){
+        int upper_bound = lower_bound + keys_per_server - 1;
+        if(extra_keys > 0){
+            upper_bound++;
+            extra_keys--;
+        }
+
+        ssm[server] = {shard_t{lower_bound, upper_bound}};
+        lower_bound = upper_bound + 1;
+    }
+
+    return ::grpc::Status::OK;
 }
 
-/**
- * Move the specified shard to the target server (passed in MoveRequest) in the
- * shardmaster's internal representation of which server has which shard. Note
- * this does not transfer any actual data in terms of kv-pairs. This function is
- * responsible for just updating the internal representation, meaning whatever
- * you chose as your data structure(s).
- *
- * @param context - you can ignore this
- * @param request A message containing a destination server address and the
- * lower/upper bounds of a shard we're putting on the destination server.
- * @param response An empty message, as we don't need to return any data
- * @return ::grpc::Status::OK on success, or
- * ::grpc::Status(::grpc::StatusCode::INVALID_ARGUMENT, "<your error message
- * here>")
- */
+
 ::grpc::Status StaticShardmaster::Move(::grpc::ServerContext* context,
                                        const ::MoveRequest* request,
                                        Empty* response) {
-  // Hint: Take a look at get_overlap in common.{h, cc}
-  // Using the function will save you lots of time and effort!
-    return ::grpc::Status(::grpc::StatusCode::INVALID_ARGUMENT, "Not implemented yet");
+    std::lock_guard<std::mutex> lock(ssm_mtx);
+
+    const auto& target_server = request->server();
+    if(ssm.find(target_server) == ssm.end()){
+        return ::grpc::Status(::grpc::StatusCode::INVALID_ARGUMENT, "Server not found");
+    }
+
+    shard_t requested_shard;
+    requested_shard.lower = request->shard().lower();
+    requested_shard.upper = request->shard().upper();
+
+    for(auto& [server, shards] : ssm){
+        std::vector<shard_t> updated_shards;
+        for(auto& shard : shards){
+            auto overlap_status = get_overlap(shard, requested_shard);
+
+            switch(overlap_status){
+                case OverlapStatus::OVERLAP_START:
+                    updated_shards.push_back(shard_t{requested_shard.upper + 1, shard.upper});
+                    break;
+                case OverlapStatus::OVERLAP_END:
+                    updated_shards.push_back(shard_t{shard.lower, requested_shard.lower - 1});
+                    break;
+                case OverlapStatus::COMPLETELY_CONTAINS:
+                    updated_shards.push_back(shard_t{shard.lower, requested_shard.lower - 1});
+                    updated_shards.push_back(shard_t{requested_shard.upper + 1, shard.upper});
+                    break;
+                case OverlapStatus::NO_OVERLAP:
+                    updated_shards.push_back(shard);
+                    break;
+            }
+        }
+
+        ssm[server] = updated_shards;
+    }
+
+    ssm[target_server].push_back(requested_shard);
+    sortAscendingInterval(ssm[target_server]);
+
+    return ::grpc::Status::OK;
 }
 
-/**
- * When this function is called, you should store the current servers and their
- * corresponding shards in QueryResponse. Take a look at
- * 'protos/shardmaster.proto' to see how to set QueryResponse correctly. Note
- * that its a list of ConfigEntry, which is a struct that has a server's address
- * and a list of the shards its currently responsible for.
- *
- * @param context - you can ignore this
- * @param request An empty message, as we don't need to send any data
- * @param response A message that specifies which shards are on which servers
- * @return ::grpc::Status::OK on success, or
- * ::grpc::Status(::grpc::StatusCode::INVALID_ARGUMENT, "<your error message
- * here>")
- */
+
 ::grpc::Status StaticShardmaster::Query(::grpc::ServerContext* context,
-                                        const StaticShardmaster::Empty* request,
+                                        const Empty* request,
                                         ::QueryResponse* response) {
-    return ::grpc::Status(::grpc::StatusCode::INVALID_ARGUMENT, "Not implemented yet");
+    std::lock_guard<std::mutex> lock(ssm_mtx);
+
+    for(const auto& server : ser){
+        auto* conf_entry = response->add_config();
+        conf_entry->set_server(server);
+        for(const auto& shard : ssm[server]){
+            auto* shard_entry = conf_entry->add_shards();
+            shard_entry->set_lower(shard.lower);
+            shard_entry->set_upper(shard.upper);
+        }
+    }
+
+    return ::grpc::Status::OK;
 }
